@@ -31,12 +31,11 @@ class MultiModelAnalyzer:
             "gemini-3.6-flash",
         ] = "gemini-3.6-flash",
     ):
-        """Initialize analyzer with the specified model."""
         self.model = model
         self.setup_model()
 
     def setup_model(self):
-        """Set up the selected model."""
+        """Initialize model-specific API config."""
         if self.model == "gpt-4-turbo":
             openai.api_key = os.getenv("OPENAI_API_KEY")
         elif self.model == "claude-3-haiku":
@@ -52,7 +51,7 @@ class MultiModelAnalyzer:
         elif self.model.startswith("gemini"):
             if not os.getenv("GOOGLE_API_KEY") and not os.getenv("GEMINI_API_KEY"):
                 raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY not set in environment")
-            self.gemini_model_name = os.getenv("GEMINI_MODEL_NAME", self.model)
+            self.gemini_model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3.6-flash")
 
     def create_research_prompt(
         self,
@@ -61,89 +60,80 @@ class MultiModelAnalyzer:
         report_text: str,
         financial_data: Dict,
     ) -> str:
-        """Create a comprehensive research prompt for equity analysis."""
-        prompt = f"""You are a senior analyst at a leading hedge fund with 20+ years of experience in equity research.
+        """Create a research prompt that forces strict JSON output."""
+        sector = financial_data.get("sector", "N/A")
+        industry = financial_data.get("industry", "N/A")
+        current_price = financial_data.get("current_price", "N/A")
+        market_cap = financial_data.get("market_cap", "N/A")
+        pe_ratio = financial_data.get("pe_ratio", "N/A")
+        low = financial_data.get("52_week_low", "N/A")
+        high = financial_data.get("52_week_high", "N/A")
+        dividend_yield = financial_data.get("dividend_yield", "N/A")
+        report_excerpt = report_text[:3000]
 
-Analyze {company_name} ({ticker}) based on the recent financial report and available information.
+        return f"""
+You are a senior analyst at a leading hedge fund with 20+ years of experience in equity research.
 
-COMPANY: {company_name} ({ticker})
-SECTOR: {financial_data.get('sector', 'N/A')}
-INDUSTRY: {financial_data.get('industry', 'N/A')}
+Imagine that you are analyzing {company_name} ({ticker}) based on the attached files and available relevant information. Provide a concise but rigorous research brief with a clear investment recommendation and a 12-month target price.
 
-CURRENT FINANCIAL METRICS:
-- Current Price: ${financial_data.get('current_price', 'N/A')}
-- Market Cap: ${financial_data.get('market_cap', 'N/A')}
-- P/E Ratio: {financial_data.get('pe_ratio', 'N/A')}
-- 52-Week Range: ${financial_data.get('52_week_low', 'N/A')} - ${financial_data.get('52_week_high', 'N/A')}
-- Dividend Yield: {financial_data.get('dividend_yield', 'N/A')}
+Use the following financial context:
+- Company: {company_name} ({ticker})
+- Sector: {sector}
+- Industry: {industry}
+- Current Price: ${current_price}
+- Market Cap: ${market_cap}
+- P/E Ratio: {pe_ratio}
+- 52-week range: ${low} to ${high}
+- Dividend Yield: {dividend_yield}
 
-RECENT FINANCIAL REPORT EXCERPT:
-{report_text[:3000]}
+Recent report excerpt:
+{report_excerpt}
 
-Return ONLY valid JSON with fields:
-{
-  "recommendation": "BUY|HOLD|SELL",
+Return ONLY valid JSON in this exact schema:
+{{
+  "recommendation": "BUY",
   "target_price": 123.45,
-  "upside_potential": 12.34,
-  "investment_thesis": "...",
-  "financial_analysis": "...",
-  "risks_and_challenges": "...",
-  "valuation_analysis": "...",
-  "bull_case": "...",
-  "bear_case": "...",
-  "key_catalysts": ["..."]
-}
+  "upside_potential": 18.5,
+  "summary": "brief explanation"
+}}
 
-Do not include markdown fences, commentary, or prose outside the JSON object.
-"""
-        return prompt
+Rules:
+- Do not return null.
+- Always provide a numeric target_price and numeric upside_potential.
+- If uncertain, still provide your best estimate.
+- recommendation must be one of BUY, HOLD, or SELL.
+- Do not include markdown fences, comments, or extra text outside the JSON.
+""".strip()
 
     @staticmethod
-    def _extract_text_from_gemini_response(result: Dict) -> str:
-        """Safely pull the textual content out of a Gemini REST response."""
-        candidates = result.get("candidates", [])
-        if not candidates:
-            raise ValueError("No Gemini candidates returned")
-
-        for candidate in candidates:
-            content = candidate.get("content", {})
-            parts = content.get("parts", [])
-            for part in parts:
-                if isinstance(part, dict) and part.get("text"):
-                    return part["text"]
-
-            if isinstance(content, dict) and content.get("text"):
-                return content["text"]
-
-        raise ValueError("Gemini response did not include text in content.parts")
-
-    @staticmethod
-    def _normalize_analysis_text(text: str) -> str:
-        """Strip markdown fences and surrounding noise from Gemini JSON responses."""
-        if not text:
-            return ""
+    def _extract_json_from_text(text: str) -> Optional[Dict]:
+        """Extract a JSON object from an LLM response."""
+        if text is None:
+            return None
 
         cleaned = text.strip()
         if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-            cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.DOTALL)
+            cleaned = cleaned.replace("```json", "").replace("```", "").strip()
 
-        # Some models prepend explanatory text before the JSON object.
-        json_start = cleaned.find("{")
-        if json_start > 0:
-            cleaned = cleaned[json_start:]
-
-        json_end = cleaned.rfind("}")
-        if json_end > 0 and json_end != len(cleaned) - 1:
-            cleaned = cleaned[: json_end + 1]
-
-        return cleaned.strip()
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except Exception:
+                    return None
+            return None
 
     def analyze_with_gemini(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
-        """Analyze stock using the Gemini API via the REST endpoint."""
+        """Call Gemini API and parse strict JSON output."""
         prompt = self.create_research_prompt(ticker, company_name, report_text, financial_data)
         api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        model_name = os.getenv("GEMINI_MODEL_NAME", self.gemini_model_name if hasattr(self, "gemini_model_name") else "gemini-3.6-flash")
+        model_name = os.getenv(
+            "GEMINI_MODEL_NAME",
+            self.gemini_model_name if hasattr(self, "gemini_model_name") else "gemini-3.6-flash",
+        )
 
         if not api_key:
             return {"ticker": ticker, "error": "GOOGLE_API_KEY not set", "model": model_name}
@@ -151,13 +141,8 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "systemInstruction": {
-                "parts": [{
-                    "text": "Return only valid JSON. Use the exact schema requested by the user. Do not include markdown fences or extra prose."
-                }]
-            },
             "generationConfig": {
-                "temperature": 0.7,
+                "temperature": 0.2,
                 "maxOutputTokens": 2000,
                 "responseMimeType": "application/json",
             },
@@ -165,38 +150,57 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
 
         try:
             response = requests.post(url, json=payload, timeout=60)
-            print("Gemini status:", response.status_code)
-            print("Gemini content-type:", response.headers.get("Content-Type"))
-            print("Gemini body preview:", response.text[:1500])
+            print("DEBUG status:", response.status_code)
+            print("DEBUG headers:", response.headers.get("Content-Type"))
+            print("DEBUG body:", response.text[:4000])
 
             response.raise_for_status()
             result = response.json()
 
             if "error" in result:
-                return {"ticker": ticker, "error": result["error"].get("message", "Unknown Gemini error"), "model": model_name}
+                return {
+                    "ticker": ticker,
+                    "error": result["error"].get("message", "Unknown Gemini error"),
+                    "model": model_name,
+                }
 
-            analysis_text = self._extract_text_from_gemini_response(result)
-            normalized = self._normalize_analysis_text(analysis_text)
+            candidates = result.get("candidates", [])
+            if not candidates:
+                return {"ticker": ticker, "error": "No Gemini candidate returned", "model": model_name}
 
-            try:
-                json.loads(normalized)
-            except json.JSONDecodeError:
-                print(f"Gemini response for {ticker} is not valid JSON. Raw response below:")
-                print(normalized[:4000])
+            text = candidates[0]["content"]["parts"][0].get("text", "")
+            if not text:
+                return {"ticker": ticker, "error": "Gemini response had no text", "model": model_name}
+
+            parsed = self._extract_json_from_text(text)
+            if not isinstance(parsed, dict):
+                return {
+                    "ticker": ticker,
+                    "error": f"Gemini response was not valid JSON: {text[:500]}",
+                    "model": model_name,
+                }
+
+            recommendation = parsed.get("recommendation", "HOLD")
+            target_price = parsed.get("target_price")
+            upside_potential = parsed.get("upside_potential")
 
             return {
                 "ticker": ticker,
                 "company_name": company_name,
-                "analysis": analysis_text,
+                "recommendation": str(recommendation).upper(),
+                "target_price": float(target_price) if target_price is not None else None,
+                "upside_potential": float(upside_potential) if upside_potential is not None else None,
+                "summary": parsed.get("summary", ""),
                 "model": model_name,
                 "timestamp": datetime.now().isoformat(),
             }
+
         except Exception as exc:
             print(f"Gemini call failed for {ticker}: {exc}")
             return {"ticker": ticker, "error": str(exc), "model": model_name}
 
     def analyze_with_openai(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
-        """Analyze stock using OpenAI GPT-4 Turbo."""
+        """Analyze using OpenAI ChatCompletion API."""
         prompt = self.create_research_prompt(ticker, company_name, report_text, financial_data)
 
         try:
@@ -206,15 +210,27 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
                     {"role": "system", "content": "You are an expert equity research analyst."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.7,
+                temperature=0.2,
                 max_tokens=2000,
             )
 
             analysis_text = response.choices[0].message.content
+            parsed = self._extract_json_from_text(analysis_text)
+
+            if not isinstance(parsed, dict):
+                return {"ticker": ticker, "error": "OpenAI response was not valid JSON", "model": "gpt-4-turbo"}
+
+            recommendation = parsed.get("recommendation")
+            target_price = parsed.get("target_price")
+            upside_potential = parsed.get("upside_potential")
+
             return {
                 "ticker": ticker,
                 "company_name": company_name,
-                "analysis": analysis_text,
+                "recommendation": recommendation.upper() if isinstance(recommendation, str) else "HOLD",
+                "target_price": float(target_price) if target_price is not None else None,
+                "upside_potential": float(upside_potential) if upside_potential is not None else None,
+                "summary": parsed.get("summary", ""),
                 "model": "gpt-4-turbo",
                 "timestamp": datetime.now().isoformat(),
             }
@@ -222,7 +238,7 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
             return {"ticker": ticker, "error": str(exc), "model": "gpt-4-turbo"}
 
     def analyze_with_claude(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
-        """Analyze stock using Anthropic Claude 3 Haiku."""
+        """Analyze using Anthropic Claude."""
         if not hasattr(self, "client"):
             return {"ticker": ticker, "error": "Claude client not initialized", "model": "claude-3-haiku"}
 
@@ -234,11 +250,24 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
             )
-            analysis_text = message.content[0].text
+
+            text = message.content[0].text
+            parsed = self._extract_json_from_text(text)
+
+            if not isinstance(parsed, dict):
+                return {"ticker": ticker, "error": "Claude response was not valid JSON", "model": "claude-3-haiku"}
+
+            recommendation = parsed.get("recommendation")
+            target_price = parsed.get("target_price")
+            upside_potential = parsed.get("upside_potential")
+
             return {
                 "ticker": ticker,
                 "company_name": company_name,
-                "analysis": analysis_text,
+                "recommendation": recommendation.upper() if isinstance(recommendation, str) else "HOLD",
+                "target_price": float(target_price) if target_price is not None else None,
+                "upside_potential": float(upside_potential) if upside_potential is not None else None,
+                "summary": parsed.get("summary", ""),
                 "model": "claude-3-haiku",
                 "timestamp": datetime.now().isoformat(),
             }
@@ -246,32 +275,44 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
             return {"ticker": ticker, "error": str(exc), "model": "claude-3-haiku"}
 
     def analyze_with_moonshot(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
-        """Analyze stock using Moonshot/Kimi."""
+        """Analyze using Moonshot API."""
         prompt = self.create_research_prompt(ticker, company_name, report_text, financial_data)
         api_key = os.getenv("MOONSHOT_API_KEY")
 
         try:
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            data = {
+            payload = {
                 "model": "moonshot-v1-8k",
                 "messages": [
                     {"role": "system", "content": "You are an expert equity research analyst."},
                     {"role": "user", "content": prompt},
                 ],
-                "temperature": 0.7,
+                "temperature": 0.2,
             }
 
-            response = requests.post("https://api.moonshot.cn/v1/chat/completions", headers=headers, json=data, timeout=30)
+            response = requests.post("https://api.moonshot.cn/v1/chat/completions", headers=headers, json=payload, timeout=30)
             result = response.json()
 
             if "error" in result:
                 return {"ticker": ticker, "error": result["error"].get("message", "Unknown error"), "model": "moonshot"}
 
-            analysis_text = result["choices"][0]["message"]["content"]
+            text = result["choices"][0]["message"]["content"]
+            parsed = self._extract_json_from_text(text)
+
+            if not isinstance(parsed, dict):
+                return {"ticker": ticker, "error": "Moonshot response was not valid JSON", "model": "moonshot"}
+
+            recommendation = parsed.get("recommendation")
+            target_price = parsed.get("target_price")
+            upside_potential = parsed.get("upside_potential")
+
             return {
                 "ticker": ticker,
                 "company_name": company_name,
-                "analysis": analysis_text,
+                "recommendation": recommendation.upper() if isinstance(recommendation, str) else "HOLD",
+                "target_price": float(target_price) if target_price is not None else None,
+                "upside_potential": float(upside_potential) if upside_potential is not None else None,
+                "summary": parsed.get("summary", ""),
                 "model": "moonshot",
                 "timestamp": datetime.now().isoformat(),
             }
@@ -279,32 +320,44 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
             return {"ticker": ticker, "error": str(exc), "model": "moonshot"}
 
     def analyze_with_baichuan(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
-        """Analyze stock using Baichuan 4 Finance."""
+        """Analyze using Baichuan API."""
         prompt = self.create_research_prompt(ticker, company_name, report_text, financial_data)
         api_key = os.getenv("BAICHUAN_API_KEY")
 
         try:
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            data = {
+            payload = {
                 "model": "Baichuan4-Finance",
                 "messages": [
                     {"role": "system", "content": "You are an expert equity research analyst."},
                     {"role": "user", "content": prompt},
                 ],
-                "temperature": 0.7,
+                "temperature": 0.2,
             }
 
-            response = requests.post("https://api.baichuan-ai.com/v1/chat/completions", headers=headers, json=data, timeout=30)
+            response = requests.post("https://api.baichuan-ai.com/v1/chat/completions", headers=headers, json=payload, timeout=30)
             result = response.json()
 
             if "error" in result:
                 return {"ticker": ticker, "error": result["error"].get("message", "Unknown error"), "model": "baichuan-4-finance"}
 
-            analysis_text = result["choices"][0]["message"]["content"]
+            text = result["choices"][0]["message"]["content"]
+            parsed = self._extract_json_from_text(text)
+
+            if not isinstance(parsed, dict):
+                return {"ticker": ticker, "error": "Baichuan response was not valid JSON", "model": "baichuan-4-finance"}
+
+            recommendation = parsed.get("recommendation")
+            target_price = parsed.get("target_price")
+            upside_potential = parsed.get("upside_potential")
+
             return {
                 "ticker": ticker,
                 "company_name": company_name,
-                "analysis": analysis_text,
+                "recommendation": recommendation.upper() if isinstance(recommendation, str) else "HOLD",
+                "target_price": float(target_price) if target_price is not None else None,
+                "upside_potential": float(upside_potential) if upside_potential is not None else None,
+                "summary": parsed.get("summary", ""),
                 "model": "baichuan-4-finance",
                 "timestamp": datetime.now().isoformat(),
             }
@@ -312,15 +365,19 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
             return {"ticker": ticker, "error": str(exc), "model": "baichuan-4-finance"}
 
     def analyze_stock(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
-        """Conduct AI-powered equity research analysis on a stock."""
+        """Analyze a single stock using the selected model."""
         cache_file = os.path.join(CACHE_DIR, f"research_{ticker}_{self.model}.json")
 
         if os.path.exists(cache_file):
-            with open(cache_file, "r", encoding="utf-8") as handle:
-                cached = json.load(handle)
-                if (datetime.now() - datetime.fromisoformat(cached["timestamp"])) .days < 7:
-                    print(f"Loading cached analysis for {ticker} ({self.model})")
-                    return cached
+            try:
+                with open(cache_file, "r", encoding="utf-8") as handle:
+                    cached = json.load(handle)
+                if "timestamp" in cached:
+                    if (datetime.now() - datetime.fromisoformat(cached["timestamp"])).days < 7:
+                        print(f"Loading cached analysis for {ticker} ({self.model})")
+                        return cached
+            except Exception:
+                pass
 
         print(f"Analyzing {ticker} with {self.model}...")
 
@@ -337,14 +394,9 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
         else:
             return {"ticker": ticker, "error": f"Unknown model: {self.model}"}
 
-        if "error" not in result and "analysis" in result:
-            analysis_text = result["analysis"]
-            result["target_price"] = self._extract_target_price(analysis_text)
-            result["recommendation"] = self._extract_recommendation(analysis_text)
-            result["current_price"] = financial_data.get("current_price")
-
-            if result["target_price"] and result["current_price"]:
-                result["upside_potential"] = ((result["target_price"] - result["current_price"]) / result["current_price"]) * 100
+        if "error" not in result:
+            if result.get("recommendation") is None:
+                result["recommendation"] = "HOLD"
 
         os.makedirs(CACHE_DIR, exist_ok=True)
         with open(cache_file, "w", encoding="utf-8") as handle:
@@ -354,13 +406,11 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
 
     @staticmethod
     def _extract_target_price(analysis_text: str) -> Optional[float]:
-        """Extract target price from analysis text."""
         patterns = [
             r"Target Price[:\s]+\$?([\d.]+)",
             r"Price Target[:\s]+\$?([\d.]+)",
             r"12-month target[:\s]+\$?([\d.]+)",
         ]
-
         for pattern in patterns:
             match = re.search(pattern, analysis_text, re.IGNORECASE)
             if match:
@@ -368,12 +418,10 @@ Do not include markdown fences, commentary, or prose outside the JSON object.
                     return float(match.group(1))
                 except ValueError:
                     continue
-
         return None
 
     @staticmethod
     def _extract_recommendation(analysis_text: str) -> Optional[str]:
-        """Extract investment recommendation from analysis text."""
         ratings = ["BUY", "HOLD", "SELL"]
         for rating in ratings:
             if re.search(rf"[^\w]{rating}[^\w]|^{rating}[^\w]|[^\w]{rating}$", analysis_text, re.IGNORECASE):
@@ -388,13 +436,11 @@ def analyze_stock(
     financial_data: Dict,
     model: str = "gemini-3.6-flash",
 ) -> Dict:
-    """Analyze a single stock with the specified model."""
     analyzer = MultiModelAnalyzer(model=model)
     return analyzer.analyze_stock(ticker, company_name, report_text, financial_data)
 
 
 def analyze_multiple_stocks(stocks: Dict, model: str = "gemini-3.6-flash") -> Dict[str, Dict]:
-    """Analyze multiple stocks with the specified model."""
     analyzer = MultiModelAnalyzer(model=model)
     results = {}
 
