@@ -1,6 +1,7 @@
 """Configuration settings for the stock screener with multi-model support."""
 
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -9,7 +10,7 @@ load_dotenv()
 # MODEL SELECTION
 # ==============================================================================
 # Choose your primary analysis model
-ANALYSIS_MODEL = os.getenv("ANALYSIS_MODEL", "moonshot")  # Options: gpt-4-turbo, claude-3-haiku, moonshot, baichuan-4-finance
+ANALYSIS_MODEL = os.getenv("ANALYSIS_MODEL", "gemini-3.7-flash")  # Options: gpt-4-turbo, claude-3-haiku, moonshot, baichuan-4-finance, gemini-3.7-flash
 
 # ==============================================================================
 # API KEYS (Add these to your .env file)
@@ -26,6 +27,10 @@ MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY")
 
 # Baichuan (for Baichuan 4 Finance)
 BAICHUAN_API_KEY = os.getenv("BAICHUAN_API_KEY")
+
+# Google Gemini
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
 
 # SEC EDGAR
 SEC_EDGAR_USERNAME = os.getenv("SEC_EDGAR_USERNAME", "research@stockscreener.com")
@@ -101,44 +106,41 @@ MODEL_SETTINGS = {
         "quality_rating": 8,
         "best_for": "Volume screening, ultra-cheap",
     },
+    "gemini-3.7-flash": {
+        "model_name": GEMINI_MODEL_NAME,
+        "provider": "Google Gemini",
+        "cost_per_stock": 0.00375,
+        "api_key_env": "GOOGLE_API_KEY",
+        "api_endpoint": "https://generativelanguage.googleapis.com",
+        "max_tokens": 2000,
+        "temperature": 0.7,
+        "quality_rating": 9,
+        "best_for": "Fast, cheap, strong reasoning for screening workflows",
+    },
 }
 
 # ==============================================================================
 # COST ESTIMATION
 # ==============================================================================
 
+
 def estimate_analysis_cost(num_stocks: int, model: str = None) -> float:
-    """Estimate cost of analyzing N stocks.
-    
-    Args:
-        num_stocks: Number of stocks to analyze
-        model: Model to use (defaults to ANALYSIS_MODEL)
-        
-    Returns:
-        Estimated cost in USD
-    """
+    """Estimate cost of analyzing N stocks."""
     if model is None:
         model = ANALYSIS_MODEL
-    
+
     if model not in MODEL_SETTINGS:
         return 0.0
-    
+
     cost_per_stock = MODEL_SETTINGS[model]["cost_per_stock"]
     return num_stocks * cost_per_stock
 
 
 def get_model_info(model: str = None) -> dict:
-    """Get information about a model.
-    
-    Args:
-        model: Model name (defaults to ANALYSIS_MODEL)
-        
-    Returns:
-        Dictionary with model information
-    """
+    """Get information about a model."""
     if model is None:
         model = ANALYSIS_MODEL
-    
+
     return MODEL_SETTINGS.get(model, {})
 
 
@@ -146,15 +148,9 @@ def get_model_info(model: str = None) -> dict:
 # COST COMPARISON HELPER
 # ==============================================================================
 
+
 def compare_model_costs(num_stocks: int) -> dict:
-    """Compare costs across all models for analyzing N stocks.
-    
-    Args:
-        num_stocks: Number of stocks to analyze
-        
-    Returns:
-        Dictionary with cost comparisons
-    """
+    """Compare costs across all models for analyzing N stocks."""
     comparison = {}
     for model, settings in MODEL_SETTINGS.items():
         cost = settings["cost_per_stock"] * num_stocks
@@ -168,7 +164,7 @@ def compare_model_costs(num_stocks: int) -> dict:
 
 
 # ==============================================================================
-# SCREENING STRATEGY PRESETS
+# SCREENING STRATEGIES PRESETS
 # ==============================================================================
 
 SCREENING_STRATEGIES = {
@@ -181,18 +177,18 @@ SCREENING_STRATEGIES = {
     },
     "balanced": {
         "description": "Good quality at reasonable cost (RECOMMENDED)",
-        "screening_model": "moonshot",
-        "analysis_model": "moonshot",
+        "screening_model": "gemini-3.7-flash",
+        "analysis_model": "gemini-3.7-flash",
         "premium_model": None,
-        "estimated_cost_per_100_stocks": 0.10,
+        "estimated_cost_per_100_stocks": 0.38,
     },
     "hybrid": {
         "description": "Tiered approach for best results",
-        "screening_model": "baichuan-4-finance",  # Screen all at low cost
-        "analysis_model": "moonshot",  # Detailed analysis
-        "premium_model": "gpt-4-turbo",  # Top picks only
+        "screening_model": "baichuan-4-finance",
+        "analysis_model": "gemini-3.7-flash",
+        "premium_model": "gpt-4-turbo",
         "estimated_cost_per_100_stocks": 0.50,
-        "strategy": "Baichuan for all, Moonshot for top 50%, GPT-4 for top 5%",
+        "strategy": "Baichuan for all, Gemini for top 50%, GPT-4 for top 5%",
     },
     "premium": {
         "description": "Best quality only (highest cost)",
@@ -215,40 +211,34 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 # VALIDATION & HEALTH CHECK
 # ==============================================================================
 
+
 def validate_configuration():
-    """Validate that required configuration is set.
-    
-    Returns:
-        Tuple of (is_valid, messages)
-    """
+    """Validate that required configuration is set."""
     messages = []
-    
-    # Check if model is valid
+
     if ANALYSIS_MODEL not in MODEL_SETTINGS:
         messages.append(f"ERROR: ANALYSIS_MODEL '{ANALYSIS_MODEL}' not found")
         return False, messages
-    
-    # Check if API key is set for selected model
+
     api_key_env = MODEL_SETTINGS[ANALYSIS_MODEL]["api_key_env"]
     api_key = os.getenv(api_key_env)
-    
+
     if not api_key:
         messages.append(f"WARNING: {api_key_env} not set in .env file")
         messages.append(f"         Will fail when trying to use {ANALYSIS_MODEL}")
     else:
         messages.append(f"✓ {api_key_env} is configured")
-    
-    # Check directories
+
     if os.path.isdir(REPORTS_DIR):
         messages.append(f"✓ Reports directory: {REPORTS_DIR}")
     else:
         messages.append(f"⚠ Could not create reports directory: {REPORTS_DIR}")
-    
+
     if os.path.isdir(CACHE_DIR):
         messages.append(f"✓ Cache directory: {CACHE_DIR}")
     else:
         messages.append(f"⚠ Could not create cache directory: {CACHE_DIR}")
-    
+
     return len([m for m in messages if m.startswith("ERROR")]) == 0, messages
 
 
@@ -257,10 +247,10 @@ def validate_configuration():
 # ==============================================================================
 
 if __name__ == "__main__":
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("STOCK SCREENER CONFIGURATION")
-    print("="*80)
-    
+    print("=" * 80)
+
     print(f"\nActive Model: {ANALYSIS_MODEL}")
     model_info = get_model_info()
     if model_info:
@@ -268,23 +258,23 @@ if __name__ == "__main__":
         print(f"  Cost per stock: ${model_info.get('cost_per_stock')}")
         print(f"  Quality rating: {model_info.get('quality_rating')}/10")
         print(f"  Best for: {model_info.get('best_for')}")
-    
+
     print(f"\nDirectories:")
     print(f"  Reports: {REPORTS_DIR}")
     print(f"  Cache: {CACHE_DIR}")
-    
+
     print(f"\nCost Estimates (for 100 stocks):")
     costs = compare_model_costs(100)
     for model, info in costs.items():
         print(f"  {model:20} ${info['cost']:8.2f}")
-    
+
     print(f"\nConfiguration Status:")
     is_valid, messages = validate_configuration()
     for msg in messages:
         print(f"  {msg}")
-    
+
     print(f"\nAvailable Strategies:")
     for strategy, details in SCREENING_STRATEGIES.items():
         print(f"  • {strategy:15} - {details['description']}")
-    
-    print("\n" + "="*80)
+
+    print("\n" + "=" * 80)
