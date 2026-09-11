@@ -2,11 +2,12 @@
 
 import argparse
 import json
+import traceback
 from typing import Dict, List, Optional
 
 import pandas as pd
 
-from config import ANALYSIS_MODEL, CACHE_DIR
+from config import ANALYSIS_MODEL
 from equity_analyzer import analyze_multiple_stocks
 from report_downloader import get_latest_reports
 from stock_ranker import StockRanker
@@ -22,7 +23,7 @@ class StockScreener:
         self.reports = {}
         self.analysis_results = {}
         self.ranker = StockRanker()
-        self.ranked_df = None
+        self.ranked_df = pd.DataFrame()
 
     def step_1_get_universe(self, limit: Optional[int] = None) -> pd.DataFrame:
         """Step 1: Select investment universe (NASDAQ 100)."""
@@ -95,7 +96,6 @@ class StockScreener:
             company_name = stock_row.iloc[0]["company_name"]
             sector = stock_row.iloc[0].get("sector", "Technology")
 
-            # Local fallback report text avoids SEC blocking during prototype testing.
             report_text = (
                 f"{company_name} ({ticker}) is a publicly traded company operating in the "
                 f"{sector} sector. The business has a meaningful market presence, solid customer demand, "
@@ -134,9 +134,12 @@ class StockScreener:
                         print(f"    Target Price: ${analysis['target_price']:.2f}")
                         if analysis.get("upside_potential"):
                             print(f"    Upside Potential: {analysis['upside_potential']:.2f}%")
+
         except Exception as exc:
+            traceback.print_exc()
             print(f"\n⚠ Error during analysis: {str(exc)}")
             print("Make sure your API key is set in your .env file")
+            self.analysis_results = {}
 
         return self.analysis_results
 
@@ -148,7 +151,8 @@ class StockScreener:
 
         if self.universe_df is None or not self.analysis_results:
             print("ERROR: Please run steps 1-3 first")
-            return pd.DataFrame()
+            self.ranked_df = pd.DataFrame()
+            return self.ranked_df
 
         print("\nRanking stocks based on upside potential and investment metrics...")
         self.ranked_df = self.ranker.rank_stocks(self.analysis_results, self.universe_df)
@@ -162,7 +166,17 @@ class StockScreener:
 
             top_10 = self.ranker.get_top_stocks(10)
             print(
-                top_10[["rank", "ticker", "company_name", "recommendation", "current_price", "target_price", "upside_potential_%"]]
+                top_10[
+                    [
+                        "rank",
+                        "ticker",
+                        "company_name",
+                        "recommendation",
+                        "current_price",
+                        "target_price",
+                        "upside_potential_%",
+                    ]
+                ]
                 .to_string(index=False)
             )
 
@@ -189,7 +203,12 @@ class StockScreener:
         print(f"Unknown format: {format}")
         return ""
 
-    def run_full_screen(self, limit_universe: Optional[int] = None, sample_analysis: Optional[int] = None, model: Optional[str] = None) -> Dict:
+    def run_full_screen(
+        self,
+        limit_universe: Optional[int] = None,
+        sample_analysis: Optional[int] = None,
+        model: Optional[str] = None,
+    ) -> Dict:
         """Run the complete stock screening pipeline."""
         print("\n" + "🚀 " * 20)
         print("STARTING AI-POWERED STOCK SCREENER")
@@ -217,11 +236,15 @@ class StockScreener:
         print(f"  • CSV: {csv_path}")
         print(f"  • JSON: {json_path}")
 
+        top_opportunity = None
+        if self.ranked_df is not None and not self.ranked_df.empty:
+            top_opportunity = self.ranked_df.iloc[0]["ticker"]
+
         return {
             "universe_size": len(self.universe_df),
             "stocks_analyzed": len(self.analysis_results),
             "stocks_ranked": len(self.ranked_df) if self.ranked_df is not None else 0,
-            "top_opportunity": self.ranked_df.iloc[0]["ticker"] if not self.ranked_df.empty else None,
+            "top_opportunity": top_opportunity,
         }
 
 
@@ -230,7 +253,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AI-powered stock screener")
     parser.add_argument("--limit", type=int, default=20, help="Number of stocks in the investment universe")
     parser.add_argument("--sample", type=int, default=5, help="Number of stocks to analyze")
-    parser.add_argument("--model", type=str, default=None, help="Model to use for analysis (e.g. gemini-3.7-flash)")
+    parser.add_argument("--model", type=str, default=None, help="Model to use for analysis (e.g. gemini-3.6-flash)")
     return parser.parse_args()
 
 
