@@ -2,11 +2,12 @@
 
 import argparse
 import json
+import os
 from typing import Dict, List, Optional
 
 import pandas as pd
 
-from config import ANALYSIS_MODEL, CACHE_DIR
+from config import ANALYSIS_MODEL
 from equity_analyzer import analyze_multiple_stocks
 from report_downloader import download_report_text, get_latest_reports
 from stock_ranker import StockRanker
@@ -16,9 +17,10 @@ from stock_universe import get_stock_universe
 class StockScreener:
     """Main orchestrator for the AI-powered stock screener."""
 
-    def __init__(self, model: Optional[str] = None):
+    def __init__(self, model: Optional[str] = None, demo_only: bool = False):
         """Initialize the stock screener."""
         self.model = model or ANALYSIS_MODEL
+        self.demo_only = demo_only
         self.universe_df = None
         self.reports = {}
         self.analysis_results = {}
@@ -118,11 +120,12 @@ class StockScreener:
                 },
             }
 
+        demo_message = "demo fallback enabled" if self.demo_only else "AI credentials are optional in demo mode; if missing, the system will generate a deterministic fallback analysis."
         print(f"\nAnalyzing {len(stocks_to_analyze)} stocks using {self.model}...")
-        print("AI credentials are optional in demo mode; if missing, the system will generate a deterministic fallback analysis.")
+        print(demo_message)
 
         try:
-            self.analysis_results = analyze_multiple_stocks(stocks_to_analyze, model=self.model)
+            self.analysis_results = analyze_multiple_stocks(stocks_to_analyze, model=self.model, demo_only=self.demo_only)
             successful = sum(1 for r in self.analysis_results.values() if "error" not in r)
             print(f"\n✓ Successfully analyzed {successful} stocks")
 
@@ -227,14 +230,14 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=20, help="Max number of stocks to screen from the universe")
     parser.add_argument("--sample", type=int, default=5, help="Max number of stocks to analyze")
     parser.add_argument("--model", choices=["gpt-4-turbo", "claude-3-haiku", "moonshot", "baichuan-4-finance"], default=ANALYSIS_MODEL, help="Model to use for analysis")
-    parser.add_argument("--demo-only", action="store_true", help="Run with deterministic fallback analysis even if no API keys are configured")
+    parser.add_argument("--demo-only", action="store_true", help="Force deterministic demo analysis even when API credentials are configured")
     return parser.parse_args()
 
 
 def main():
     """Main entry point for the stock screener."""
     args = parse_args()
-    screener = StockScreener(model=args.model)
+    screener = StockScreener(model=args.model, demo_only=args.demo_only)
 
     results = screener.run_full_screen(
         limit_universe=args.limit,

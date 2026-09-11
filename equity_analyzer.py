@@ -27,10 +27,12 @@ class MultiModelAnalyzer:
 
     def __init__(
         self,
-        model: Literal["gpt-4-turbo", "claude-3-haiku", "moonshot", "baichuan-4-finance"] = None,
+        model: Optional[Literal["gpt-4-turbo", "claude-3-haiku", "moonshot", "baichuan-4-finance"]] = None,
+        demo_only: bool = False,
     ):
         """Initialize analyzer with specified model."""
         self.model = model or ANALYSIS_MODEL
+        self.demo_only = demo_only
         self.client = None
         self.api_key = None
         self.setup_model()
@@ -39,7 +41,7 @@ class MultiModelAnalyzer:
         """Setup the selected model."""
         if self.model == "gpt-4-turbo":
             self.api_key = os.getenv("OPENAI_API_KEY")
-            if self.api_key:
+            if self.api_key and not self.demo_only:
                 self.client = openai.OpenAI(api_key=self.api_key)
             else:
                 self.client = None
@@ -47,14 +49,17 @@ class MultiModelAnalyzer:
             if anthropic is None:
                 raise ImportError("anthropic package required. Install with: pip install anthropic")
             self.api_key = os.getenv("ANTHROPIC_API_KEY")
-            self.client = anthropic.Anthropic(api_key=self.api_key) if self.api_key else None
+            if self.api_key and not self.demo_only:
+                self.client = anthropic.Anthropic(api_key=self.api_key)
+            else:
+                self.client = None
         elif self.model == "moonshot":
             self.api_key = os.getenv("MOONSHOT_API_KEY")
         elif self.model == "baichuan-4-finance":
             self.api_key = os.getenv("BAICHUAN_API_KEY")
 
-    def _has_api_credentials(self) -> bool:
-        return bool(self.api_key or self.client)
+    def _should_use_demo_fallback(self) -> bool:
+        return self.demo_only or not bool(self.api_key or self.client)
 
     def _generate_demo_result(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
         """Return a deterministic demo analysis when no API key is configured."""
@@ -154,7 +159,7 @@ Format your response in clear sections with specific numbers and actionable insi
 
     def analyze_with_openai(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
         """Analyze stock using OpenAI GPT-4 Turbo-compatible endpoint."""
-        if not self.client:
+        if self._should_use_demo_fallback():
             return self._generate_demo_result(ticker, company_name, report_text, financial_data)
 
         prompt = self.create_research_prompt(ticker, company_name, report_text, financial_data)
@@ -182,7 +187,7 @@ Format your response in clear sections with specific numbers and actionable insi
 
     def analyze_with_claude(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
         """Analyze stock using Anthropic Claude 3 Haiku."""
-        if not self.client:
+        if self._should_use_demo_fallback():
             return self._generate_demo_result(ticker, company_name, report_text, financial_data)
 
         prompt = self.create_research_prompt(ticker, company_name, report_text, financial_data)
@@ -206,7 +211,7 @@ Format your response in clear sections with specific numbers and actionable insi
 
     def analyze_with_moonshot(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
         """Analyze stock using Moonshot/Kimi."""
-        if not self.api_key:
+        if self._should_use_demo_fallback():
             return self._generate_demo_result(ticker, company_name, report_text, financial_data)
 
         prompt = self.create_research_prompt(ticker, company_name, report_text, financial_data)
@@ -249,7 +254,7 @@ Format your response in clear sections with specific numbers and actionable insi
 
     def analyze_with_baichuan(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
         """Analyze stock using Baichuan 4 Finance."""
-        if not self.api_key:
+        if self._should_use_demo_fallback():
             return self._generate_demo_result(ticker, company_name, report_text, financial_data)
 
         prompt = self.create_research_prompt(ticker, company_name, report_text, financial_data)
@@ -292,6 +297,14 @@ Format your response in clear sections with specific numbers and actionable insi
 
     def analyze_stock(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
         """Conduct AI-powered equity research analysis on a stock."""
+        if self._should_use_demo_fallback():
+            result = self._generate_demo_result(ticker, company_name, report_text, financial_data)
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            cache_file = os.path.join(CACHE_DIR, f"research_{ticker}_{self.model}.json")
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, default=str)
+            return result
+
         cache_file = os.path.join(CACHE_DIR, f"research_{ticker}_{self.model}.json")
 
         if os.path.exists(cache_file):
@@ -373,15 +386,22 @@ Format your response in clear sections with specific numbers and actionable insi
 
 
 # Backward compatibility functions
-def analyze_stock(ticker: str, company_name: str, report_text: str, financial_data: Dict, model: Optional[str] = None) -> Dict:
+def analyze_stock(
+    ticker: str,
+    company_name: str,
+    report_text: str,
+    financial_data: Dict,
+    model: Optional[str] = None,
+    demo_only: bool = False,
+) -> Dict:
     """Analyze a single stock with a specified model."""
-    analyzer = MultiModelAnalyzer(model=model or ANALYSIS_MODEL)
+    analyzer = MultiModelAnalyzer(model=model or ANALYSIS_MODEL, demo_only=demo_only)
     return analyzer.analyze_stock(ticker, company_name, report_text, financial_data)
 
 
-def analyze_multiple_stocks(stocks: Dict, model: Optional[str] = None) -> Dict[str, Dict]:
-    """Analyze multiple stocks with the configured model."""
-    analyzer = MultiModelAnalyzer(model=model or ANALYSIS_MODEL)
+def analyze_multiple_stocks(stocks: Dict, model: Optional[str] = None, demo_only: bool = False) -> Dict[str, Dict]:
+    """Analyze multiple stocks with an optional demo fallback."""
+    analyzer = MultiModelAnalyzer(model=model or ANALYSIS_MODEL, demo_only=demo_only)
     results = {}
 
     for ticker, stock_data in stocks.items():

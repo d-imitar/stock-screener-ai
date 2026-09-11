@@ -60,6 +60,12 @@ Update `.env` with your chosen model and credentials. If you do not have an API 
 python main.py --limit 20 --sample 5 --model moonshot
 ```
 
+Optional demo-only execution:
+
+```bash
+python main.py --demo-only --limit 20 --sample 5
+```
+
 ### 4) Run the dashboard
 
 ```bash
