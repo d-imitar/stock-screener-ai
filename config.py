@@ -40,7 +40,7 @@ NASDAQ_100_LIMIT = int(os.getenv("NASDAQ_100_LIMIT", 100))
 # ==============================================================================
 REPORT_CACHE_DAYS = int(os.getenv("REPORT_CACHE_DAYS", 30))
 REPORTS_DIR = "data/reports"
-CACHE_DIR = "data/cache"
+CACHE_DIR = r"C:\Temp\stock-screener-ai\cache"
 
 # ==============================================================================
 # ANALYSIS SETTINGS
