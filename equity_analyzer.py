@@ -52,7 +52,7 @@ class MultiModelAnalyzer:
         elif self.model.startswith("gemini"):
             if not os.getenv("GOOGLE_API_KEY") and not os.getenv("GEMINI_API_KEY"):
                 raise ValueError("GOOGLE_API_KEY or GEMINI_API_KEY not set in environment")
-            self.gemini_model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3.6-flash")
+            self.gemini_model_name = os.getenv("GEMINI_MODEL_NAME", self.model)
 
     def create_research_prompt(
         self,
@@ -80,22 +80,64 @@ CURRENT FINANCIAL METRICS:
 RECENT FINANCIAL REPORT EXCERPT:
 {report_text[:3000]}
 
-Please provide a comprehensive equity research report including:
+Return ONLY valid JSON with fields:
+{
+  "recommendation": "BUY|HOLD|SELL",
+  "target_price": 123.45,
+  "upside_potential": 12.34,
+  "investment_thesis": "...",
+  "financial_analysis": "...",
+  "risks_and_challenges": "...",
+  "valuation_analysis": "...",
+  "bull_case": "...",
+  "bear_case": "...",
+  "key_catalysts": ["..."]
+}
 
-1. **INVESTMENT THESIS** (2-3 paragraphs)
-2. **FINANCIAL ANALYSIS** (2-3 paragraphs)
-3. **RISKS & CHALLENGES** (2-3 paragraphs)
-4. **VALUATION ANALYSIS** (2-3 paragraphs)
-5. **INVESTMENT RECOMMENDATION**
-   - Rating: BUY / HOLD / SELL
-   - Target Price (12-month): $XX.XX
-   - Upside/Downside Potential: XX%
-   - Key Catalysts (next 12 months)
-6. **BULL & BEAR CASE**
-
-Format your response in clear sections with specific numbers and actionable insights.
+Do not include markdown fences, commentary, or prose outside the JSON object.
 """
         return prompt
+
+    @staticmethod
+    def _extract_text_from_gemini_response(result: Dict) -> str:
+        """Safely pull the textual content out of a Gemini REST response."""
+        candidates = result.get("candidates", [])
+        if not candidates:
+            raise ValueError("No Gemini candidates returned")
+
+        for candidate in candidates:
+            content = candidate.get("content", {})
+            parts = content.get("parts", [])
+            for part in parts:
+                if isinstance(part, dict) and part.get("text"):
+                    return part["text"]
+
+            if isinstance(content, dict) and content.get("text"):
+                return content["text"]
+
+        raise ValueError("Gemini response did not include text in content.parts")
+
+    @staticmethod
+    def _normalize_analysis_text(text: str) -> str:
+        """Strip markdown fences and surrounding noise from Gemini JSON responses."""
+        if not text:
+            return ""
+
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"\s*```$", "", cleaned, flags=re.DOTALL)
+
+        # Some models prepend explanatory text before the JSON object.
+        json_start = cleaned.find("{")
+        if json_start > 0:
+            cleaned = cleaned[json_start:]
+
+        json_end = cleaned.rfind("}")
+        if json_end > 0 and json_end != len(cleaned) - 1:
+            cleaned = cleaned[: json_end + 1]
+
+        return cleaned.strip()
 
     def analyze_with_gemini(self, ticker: str, company_name: str, report_text: str, financial_data: Dict) -> Dict:
         """Analyze stock using the Gemini API via the REST endpoint."""
@@ -109,9 +151,15 @@ Format your response in clear sections with specific numbers and actionable insi
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
+            "systemInstruction": {
+                "parts": [{
+                    "text": "Return only valid JSON. Use the exact schema requested by the user. Do not include markdown fences or extra prose."
+                }]
+            },
             "generationConfig": {
                 "temperature": 0.7,
                 "maxOutputTokens": 2000,
+                "responseMimeType": "application/json",
             },
         }
 
@@ -119,7 +167,7 @@ Format your response in clear sections with specific numbers and actionable insi
             response = requests.post(url, json=payload, timeout=60)
             print("Gemini status:", response.status_code)
             print("Gemini content-type:", response.headers.get("Content-Type"))
-            print("Gemini body preview:", response.text[:500])
+            print("Gemini body preview:", response.text[:1500])
 
             response.raise_for_status()
             result = response.json()
@@ -127,11 +175,15 @@ Format your response in clear sections with specific numbers and actionable insi
             if "error" in result:
                 return {"ticker": ticker, "error": result["error"].get("message", "Unknown Gemini error"), "model": model_name}
 
-            candidates = result.get("candidates", [])
-            if not candidates:
-                return {"ticker": ticker, "error": "No Gemini candidate returned", "model": model_name}
+            analysis_text = self._extract_text_from_gemini_response(result)
+            normalized = self._normalize_analysis_text(analysis_text)
 
-            analysis_text = candidates[0]["content"]["parts"][0]["text"]
+            try:
+                json.loads(normalized)
+            except json.JSONDecodeError:
+                print(f"Gemini response for {ticker} is not valid JSON. Raw response below:")
+                print(normalized[:4000])
+
             return {
                 "ticker": ticker,
                 "company_name": company_name,
